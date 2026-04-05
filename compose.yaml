@@ -58,6 +58,11 @@ services:
       - |
         FLINK_PROPERTIES=
         jobmanager.rpc.address: jobmanager
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8081/overview"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
     depends_on:
       flink-loader:
         condition: service_completed_successfully
@@ -67,8 +72,6 @@ services:
   taskmanager:
     image: flink:2.2.0-java17
     container_name: taskmanager
-    depends_on:
-      - jobmanager
     command: taskmanager
     volumes:
       - flink_libs:/opt/flink/lib
@@ -77,6 +80,28 @@ services:
         FLINK_PROPERTIES=
         jobmanager.rpc.address: jobmanager
         taskmanager.numberOfTaskSlots: 2
+    depends_on:
+      jobmanager:
+        condition: service_healthy
+    networks:
+      - meowork
+
+  flink-job:
+    image: flink:2.2.0-java17
+    container_name: flink_job
+    command: >
+      sh -c "sleep 5 &&
+             /opt/flink/bin/sql-client.sh --file /flink/job.sql"
+    volumes:
+      - flink_libs:/opt/flink/lib
+      - ./flink:/flink:ro
+    environment:
+      - |
+        FLINK_PROPERTIES=
+        jobmanager.rpc.address: jobmanager
+    depends_on:
+      jobmanager:
+        condition: service_healthy
     networks:
       - meowork
 
@@ -89,6 +114,8 @@ services:
       - broker
     environment:
       KAFKA_BOOTSTRAP_SERVERS: broker:9092
+    volumes:
+      - ./source_data:/data:ro
     networks:
       - meowork
 
