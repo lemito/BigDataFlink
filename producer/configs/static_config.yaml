@@ -1,0 +1,71 @@
+components_manager:
+    task_processors:
+        main-task-processor:
+            worker_threads: $worker-threads
+
+        fs-task-processor:
+            worker_threads: $worker-fs-threads
+
+    default_task_processor: main-task-processor
+
+    components:
+        server:
+            listener:
+                port: $server-port
+                task_processor: main-task-processor
+
+        logging:
+            fs-task-processor: fs-task-processor
+            loggers:
+                default:
+                    file_path: '@stderr'
+                    level: $logger-level
+                    overflow_behavior: discard
+
+        dynamic-config:
+            defaults:
+                HTTP_CLIENT_CONNECTION_POOL_SIZE: 1000
+
+        testsuite-support: {}
+
+        congestion-control:
+
+        kafka-producer:
+            delivery_timeout: 10s
+            queue_buffering_max: 100ms
+            enable_idempotence: true
+            security_protocol: PLAINTEXT
+
+        default-secdist-provider:
+            config: /etc/producer_service/secure_data.json
+            missing-ok: true
+            environment-secrets-key: SECDIST_CONFIG
+
+        secdist: {}
+
+        http-client: {}
+
+        http-client-core:
+            load-enabled: $is-testing
+            fs-task-processor: fs-task-processor
+
+        dns-client:
+            fs-task-processor: fs-task-processor
+
+        tests-control:
+            load-enabled: $is-testing
+            path: /tests/{action}
+            method: POST
+            task_processor: main-task-processor
+
+        handler-ping:
+            path: /ping
+            method: GET
+            task_processor: main-task-processor
+            throttling_enabled: false
+            url_trailing_slash: strict-match
+
+        csv-producer:
+            csv-dir: /data
+            topic: input-topic
+            batch-size: 100

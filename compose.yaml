@@ -105,19 +105,52 @@ services:
     networks:
       - meowork
 
-  producer:
-    build:
-      context: ./producer_service
-      dockerfile: Dockerfile
-    container_name: producer
-    depends_on:
-      - broker
-    environment:
-      KAFKA_BOOTSTRAP_SERVERS: broker:9092
-    volumes:
-      - ./source_data:/data:ro
-    networks:
-      - meowork
+  # producer:
+  #   build:
+  #     context: ./producer_service
+  #     dockerfile: Dockerfile
+  #   container_name: producer
+  #   depends_on:
+  #     - broker
+  #   environment:
+  #     KAFKA_BOOTSTRAP_SERVERS: broker:9092
+  #   volumes:
+  #     - ./source_data:/data:ro
+  #   networks:
+  #     - meowork
+
+    producer:
+        image: ghcr.io/userver-framework/ubuntu-22.04-userver:latest
+        privileged: true
+        environment:
+            - CCACHE_DIR=/producer/.ccache
+            - CMAKE_OPTIONS
+            - CORES_DIR=/cores
+            - SECDIST_CONFIG={"kafka_settings":{"kafka-producer":{"brokers":"broker:9092"}}}
+        volumes:
+          - ./producer:/producer:rw
+          - ${TC_CORES_DIR:-./.cores}:/cores:rw
+          - ./source_data:/data:ro
+          - ./producer/configs/static_config.yaml:/etc/producer_service/static_config.yaml:ro
+          - ./producer/configs/config_vars.yaml:/etc/producer_service/config_vars.yaml:ro
+        ports:
+          - 8080:8080
+        working_dir: /producer
+        command: >
+            bash -c "
+                cd /producer &&
+                mkdir -p build && cd build &&
+                cmake .. -DCMAKE_BUILD_TYPE=Release ${CMAKE_OPTIONS} &&
+                make -j$(nproc) &&
+                cd /producer &&
+                ./build/kafka-producer-service
+                --config /etc/producer_service/static_config.yaml
+                --config-vars /etc/producer_service/config_vars.yaml
+            "
+        depends_on:
+        - broker
+        networks:
+        - meowork
 
 networks:
   meowork:

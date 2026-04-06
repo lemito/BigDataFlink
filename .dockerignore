@@ -1,7 +1,3 @@
-*/*.sum
-
-producer_service_old
-
 ./producer/.devcontainer
 ./producer/.github
 ./producer/.vscode
