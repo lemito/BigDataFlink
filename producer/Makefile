@@ -24,10 +24,10 @@ $(addprefix build-, $(PRESETS)): build-%: build-%/CMakeCache.txt
 	cmake --build build-$* -j $(NPROCS) --target $(PROJECT_NAME)
 
 # Test
-.PHONY: $(addprefix test-, $(PRESETS))
-$(addprefix test-, $(PRESETS)): test-%: build-%/CMakeCache.txt
-	cmake --build build-$* -j $(NPROCS)
-	cd build-$* && ((test -t 1 && GTEST_COLOR=1 PYTEST_ADDOPTS="--color=yes" ctest -V) || ctest -V)
+# .PHONY: $(addprefix test-, $(PRESETS))
+# $(addprefix test-, $(PRESETS)): test-%: build-%/CMakeCache.txt
+# 	cmake --build build-$* -j $(NPROCS)
+# 	cd build-$* && ((test -t 1 && GTEST_COLOR=1 PYTEST_ADDOPTS="--color=yes" ctest -V) || ctest -V)
 
 # Start the service (via testsuite service runner)
 .PHONY: $(addprefix start-, $(PRESETS))

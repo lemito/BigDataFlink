@@ -1,189 +1,35 @@
-#include <csv_producer.hpp>
+#pragma once
 
-#include <filesystem>
-#include <fstream>
-#include <stdexcept>
+#include <string>
 #include <vector>
 
-#include <userver/components/component_config.hpp>
-#include <userver/components/component_context.hpp>
-#include <userver/formats/json/serialize.hpp>
-#include <userver/formats/json/value_builder.hpp>
-#include <userver/kafka/exceptions.hpp>
-#include <userver/kafka/producer_component.hpp>
-#include <userver/logging/log.hpp>
+#include <userver/components/component_base.hpp>
+#include <userver/engine/task/task_with_result.hpp>
+#include <userver/kafka/producer.hpp>
 #include <userver/utils/async.hpp>
-#include <userver/yaml_config/merge_schemas.hpp>
-
+#include <rapidcsv.h>
 namespace kafka_sample {
 
-namespace {
+class CsvProducerComponent final : public userver::components::ComponentBase {
+ public:
+  static constexpr std::string_view kName = "csv-producer";
 
-namespace fs = std::filesystem;
+  CsvProducerComponent(const userver::components::ComponentConfig& config,
+                       const userver::components::ComponentContext& context);
 
-std::vector<std::string> ParseCsvLine(const std::string& line) {
-  std::vector<std::string> fields;
-  std::string field;
-  bool in_quotes = false;
+  static userver::yaml_config::Schema GetStaticConfigSchema();
 
-  for (std::size_t i = 0; i < line.size(); ++i) {
-    const char c = line[i];
-    if (c == '"') {
-      if (in_quotes && i + 1 < line.size() && line[i + 1] == '"') {
-        field += '"';
-        ++i;
-      } else {
-        in_quotes = !in_quotes;
-      }
-    } else if (c == ',' && !in_quotes) {
-      fields.push_back(std::move(field));
-      field.clear();
-    } else {
-      field += c;
-    }
-  }
-  fields.push_back(std::move(field));
-  return fields;
-}
+ private:
+  void ProcessAllFiles();
 
-std::string MakeJsonPayload(const std::vector<std::string>& headers,
-                            const std::vector<std::string>& values) {
-  formats::json::ValueBuilder obj(formats::json::Type::kObject);
-  for (std::size_t i = 0; i < headers.size(); ++i) {
-    obj[headers[i]] = (i < values.size() ? values[i] : std::string{});
-  }
-  return formats::json::ToString(obj.ExtractValue());
-}
+  void ProcessFile(const std::string& file_path);
 
-std::vector<std::string> GlobCsvFiles(const std::string& dir) {
-  std::vector<std::string> result;
-  if (!fs::exists(dir) || !fs::is_directory(dir)) {
-    LOG_WARNING() << "CSV directory does not exist or is not a directory: "
-                  << dir;
-    return result;
-  }
-  for (const auto& entry : fs::directory_iterator(dir)) {
-    if (entry.is_regular_file() && entry.path().extension() == ".csv") {
-      result.push_back(entry.path().string());
-    }
-  }
-  std::sort(result.begin(), result.end());
-  return result;
-}
+  const userver::kafka::Producer& producer_;
+  const std::string csv_dir_;
+  const std::string topic_;
+  const std::size_t batch_size_;
 
-}  // namespace
-
-CsvProducerComponent::CsvProducerComponent(
-    const components::ComponentConfig& config,
-    const components::ComponentContext& context)
-    : components::ComponentBase{config, context},
-      producer_{
-          context.FindComponent<kafka::ProducerComponent>().GetProducer()},
-      csv_dir_{config["csv-dir"].As<std::string>("/data")},
-      topic_{config["topic"].As<std::string>("input-topic")},
-      batch_size_{config["batch-size"].As<std::size_t>(100)} {}
-
-
-void CsvProducerComponent::OnAllComponentsLoaded() {
-  task_ = utils::Async("csv-producer", [this] { ProcessAllFiles(); });
-}
-
-void CsvProducerComponent::OnAllComponentsAreStopping() {
-  if (task_.IsValid()) {
-    task_.RequestCancel();
-    task_.Wait();
-  }
-}
-
-void CsvProducerComponent::ProcessAllFiles() {
-  const auto files = GlobCsvFiles(csv_dir_);
-  if (files.empty()) {
-    LOG_WARNING() << "No CSV files found in " << csv_dir_;
-    return;
-  }
-
-  LOG_INFO() << "Found " << files.size() << " CSV file(s) in " << csv_dir_;
-
-  for (const auto& path : files) {
-    LOG_INFO() << "Processing file: " << path;
-    try {
-      ProcessFile(path);
-    } catch (const std::exception& ex) {
-      LOG_ERROR() << "Failed to process file " << path << ": " << ex.what();
-    }
-  }
-
-  LOG_INFO() << "All CSV files processed.";
-}
-
-void CsvProducerComponent::ProcessFile(const std::string& file_path) {
-  std::ifstream file(file_path);
-  if (!file.is_open()) {
-    throw std::runtime_error("Cannot open file: " + file_path);
-  }
-
-  std::string header_line;
-  if (!std::getline(file, header_line)) {
-    LOG_WARNING() << "File is empty: " << file_path;
-    return;
-  }
-  const auto headers = ParseCsvLine(header_line);
-
-  std::vector<std::string> batch;
-  batch.reserve(batch_size_);
-  std::size_t total_sent = 0;
-
-  auto flush = [&] {
-    if (batch.empty()) return;
-    for (const auto& payload : batch) {
-      try {
-        producer_.Send(topic_, /*key=*/"", payload);
-      } catch (const kafka::SendException& ex) {
-        if (ex.IsRetryable()) {
-          LOG_WARNING() << "Retryable send error: " << ex.what();
-        } else {
-          LOG_ERROR() << "Non-retryable send error: " << ex.what();
-        }
-      }
-    }
-    total_sent += batch.size();
-    LOG_DEBUG() << "Flushed " << batch.size()
-                << " messages (total: " << total_sent << ")";
-    batch.clear();
-  };
-
-  std::string line;
-  while (std::getline(file, line)) {
-    if (line.empty()) continue;
-    try {
-      batch.push_back(MakeJsonPayload(headers, ParseCsvLine(line)));
-    } catch (const std::exception& ex) {
-      LOG_ERROR() << "Failed to build JSON payload: " << ex.what();
-      continue;
-    }
-    if (batch.size() >= batch_size_) flush();
-  }
-  flush();
-
-  LOG_INFO() << "File " << file_path << " done. Sent: " << total_sent;
-}
-
-yaml_config::Schema CsvProducerComponent::GetStaticConfigSchema() {
-  return yaml_config::MergeSchemas<components::ComponentBase>(R"(
-type: object
-description: Reads CSV files and produces rows as JSON messages to Kafka.
-additionalProperties: false
-properties:
-    csv-dir:
-        type: string
-        description: Path to the directory containing *.csv files.
-    topic:
-        type: string
-        description: Kafka topic to produce messages to.
-    batch-size:
-        type: integer
-        description: Number of messages accumulated before flushing to Kafka.
-)");
-}
+  userver::engine::TaskWithResult<void> task_;
+};
 
 }  // namespace kafka_sample

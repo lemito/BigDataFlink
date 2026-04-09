@@ -13,6 +13,11 @@ services:
       - ./source_data:/docker-entrypoint-initdb.d
     networks:
       - meowork
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U meow -d db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
 
   broker:
     image: apache/kafka:4.2.0
@@ -29,22 +34,42 @@ services:
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
-      KAFKA_NUM_PARTITIONS: 3
+      KAFKA_NUM_PARTITIONS: 10
+    networks:
+      - meowork
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+
+  kafka-ui:
+    container_name: kafka-ui
+    image: provectuslabs/kafka-ui:latest
+    ports:
+      - 8085:8080
+    environment:
+      DYNAMIC_CONFIG_ENABLED: 'true'
+    volumes:
+      - ./kui/config.yml:/etc/kafkaui/dynamic_config.yaml
+    depends_on:
+      - broker
     networks:
       - meowork
 
   flink-loader:
-    image: alpine:3.21
-    container_name: flink_loader
-    volumes:
-      - flink_libs:/libs
-    command: >
-      sh -c "apk add --no-cache wget &&
-             wget -P /libs/ https://repo1.maven.org/maven2/org/apache/flink/flink-connector-jdbc/3.1.2-1.18/flink-connector-jdbc-3.1.2-1.18.jar &&
-             wget -P /libs/ https://jdbc.postgresql.org/download/postgresql-42.7.2.jar &&
-             wget -P /libs/ https://repo1.maven.org/maven2/org/apache/flink/flink-connector-kafka/3.0.1-1.18/flink-connector-kafka-3.0.1-1.18.jar"
-    networks:
-      - meowork
+      image: alpine:3.21
+      container_name: flink_loader
+      volumes:
+        - flink_libs:/libs
+      command: >
+        sh -c "apk add --no-cache wget &&
+              wget -P /libs/ https://repo1.maven.org/maven2/org/apache/flink/flink-sql-connector-kafka/4.0.1-2.0/flink-sql-connector-kafka-4.0.1-2.0.jar &&
+              wget -P /libs/ https://repo1.maven.org/maven2/org/apache/flink/flink-connector-jdbc-core/4.0.0-2.0/flink-connector-jdbc-core-4.0.0-2.0.jar &&
+              wget -P /libs/ https://repo1.maven.org/maven2/org/apache/flink/flink-connector-jdbc-postgres/4.0.0-2.0/flink-connector-jdbc-postgres-4.0.0-2.0.jar &&
+              wget -P /libs/ https://repo1.maven.org/maven2/org/postgresql/postgresql/42.7.10/postgresql-42.7.10.jar"
+      networks:
+        - meowork
 
   jobmanager:
     image: flink:2.2.0-java17
@@ -59,7 +84,7 @@ services:
         FLINK_PROPERTIES=
         jobmanager.rpc.address: jobmanager
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8081/overview"]
+      test: ["CMD", "wget", "-nv", "-t1", "--spider", "http://localhost:8081/overview"]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -76,10 +101,10 @@ services:
     volumes:
       - flink_libs:/opt/flink/lib
     environment:
-      - |
-        FLINK_PROPERTIES=
-        jobmanager.rpc.address: jobmanager
-        taskmanager.numberOfTaskSlots: 2
+          FLINK_PROPERTIES: |
+            jobmanager.rpc.address: jobmanager
+            taskmanager.numberOfTaskSlots: 10
+            taskmanager.memory.process.size: 1600m
     depends_on:
       jobmanager:
         condition: service_healthy
@@ -100,55 +125,56 @@ services:
         FLINK_PROPERTIES=
         jobmanager.rpc.address: jobmanager
     depends_on:
+      flink-loader:
+        condition: service_completed_successfully
       jobmanager:
+        condition: service_started
+      taskmanager:
+        condition: service_started
+      broker:
+        condition: service_healthy
+      postgres:
         condition: service_healthy
     networks:
       - meowork
+    healthcheck:
+      test: ["CMD", "test", "-f", "/tmp/job_ready"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+      start_period: 45s
 
-  # producer:
-  #   build:
-  #     context: ./producer_service
-  #     dockerfile: Dockerfile
-  #   container_name: producer
-  #   depends_on:
-  #     - broker
-  #   environment:
-  #     KAFKA_BOOTSTRAP_SERVERS: broker:9092
-  #   volumes:
-  #     - ./source_data:/data:ro
-  #   networks:
-  #     - meowork
-
-    producer:
-        image: ghcr.io/userver-framework/ubuntu-22.04-userver:latest
+  producer:
+        image: ghcr.io/userver-framework/ubuntu-24.04-userver:latest
         privileged: true
         environment:
             - CCACHE_DIR=/producer/.ccache
             - CMAKE_OPTIONS
             - CORES_DIR=/cores
-            - SECDIST_CONFIG={"kafka_settings":{"kafka-producer":{"brokers":"broker:9092"}}}
+            # - SECDIST_CONFIG={"kafka_settings":{"kafka-producer":{"brokers":"broker:9092"}}}
         volumes:
           - ./producer:/producer:rw
           - ${TC_CORES_DIR:-./.cores}:/cores:rw
           - ./source_data:/data:ro
-          - ./producer/configs/static_config.yaml:/etc/producer_service/static_config.yaml:ro
-          - ./producer/configs/config_vars.yaml:/etc/producer_service/config_vars.yaml:ro
+          - ./producer/configs/secure_data.json:/etc/producer/secure_data.json:ro
+          - ./producer/configs/static_config.yaml:/etc/producer/static_config.yaml:ro
+          - ./producer/configs/config_vars.yaml:/etc/producer/config_vars.yaml:ro
         ports:
-          - 8080:8080
+          - 8052:8052
         working_dir: /producer
         command: >
-            bash -c "
-                cd /producer &&
-                mkdir -p build && cd build &&
-                cmake .. -DCMAKE_BUILD_TYPE=Release ${CMAKE_OPTIONS} &&
-                make -j$(nproc) &&
-                cd /producer &&
-                ./build/kafka-producer-service
-                --config /etc/producer_service/static_config.yaml
-                --config-vars /etc/producer_service/config_vars.yaml
-            "
+                    bash -c "
+                        cd /producer &&
+                        mkdir -p build && cd build &&
+                        cmake .. -DCMAKE_BUILD_TYPE=Release ${CMAKE_OPTIONS} &&
+                        make -j$$(nproc) &&
+                        /producer/build/producer --config /etc/producer/static_config.yaml
+                    "
         depends_on:
-        - broker
+          broker:
+            condition: service_healthy
+          flink-job:
+            condition: service_healthy
         networks:
         - meowork
 

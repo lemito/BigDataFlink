@@ -1,202 +1,125 @@
-#include <csv_producer.hpp>
+#include "csv_producer.hpp"
 
 #include <filesystem>
 #include <fstream>
 #include <sstream>
-#include <stdexcept>
-#include <vector>
-
 #include <userver/components/component_config.hpp>
 #include <userver/components/component_context.hpp>
-#include <userver/formats/json/inline.hpp>
-#include <userver/kafka/exceptions.hpp>
+#include <userver/engine/async.hpp>
+#include <userver/engine/sleep.hpp>
+#include <userver/formats/json/serialize.hpp>
+#include <userver/formats/json/value_builder.hpp>
 #include <userver/kafka/producer_component.hpp>
 #include <userver/logging/log.hpp>
-#include <userver/utils/async.hpp>
 #include <userver/yaml_config/merge_schemas.hpp>
 
 namespace kafka_sample {
 
-namespace {
-
-namespace fs = std::filesystem;
-
-// Parse a single CSV line respecting quoted fields.
-std::vector<std::string> ParseCsvLine(const std::string& line) {
-  std::vector<std::string> fields;
-  std::string field;
-  bool in_quotes = false;
-
-  for (std::size_t i = 0; i < line.size(); ++i) {
-    char c = line[i];
-    if (c == '"') {
-      if (in_quotes && i + 1 < line.size() && line[i + 1] == '"') {
-        // Escaped double-quote inside quoted field
-        field += '"';
-        ++i;
-      } else {
-        in_quotes = !in_quotes;
-      }
-    } else if (c == ',' && !in_quotes) {
-      fields.push_back(std::move(field));
-      field.clear();
-    } else {
-      field += c;
-    }
-  }
-  fields.push_back(std::move(field));
-  return fields;
-}
-
-// Build a JSON string from header names and row values.
-// {"col1":"val1","col2":"val2",...}
-std::string MakeJsonPayload(const std::vector<std::string>& headers,
-                            const std::vector<std::string>& values) {
-  auto builder = formats::json::MakeObject();
-  // formats::json::MakeObject returns a Value — build via ValueBuilder instead
-  formats::json::ValueBuilder obj(formats::json::Type::kObject);
-  for (std::size_t i = 0; i < headers.size(); ++i) {
-    obj[headers[i]] = (i < values.size() ? values[i] : std::string{});
-  }
-  return formats::json::ToString(obj.ExtractValue());
-}
-
-std::vector<std::string> GlobCsvFiles(const std::string& dir) {
-  std::vector<std::string> result;
-  if (!fs::exists(dir) || !fs::is_directory(dir)) {
-    LOG_WARNING() << "CSV directory does not exist or is not a directory: "
-                  << dir;
-    return result;
-  }
-  for (const auto& entry : fs::directory_iterator(dir)) {
-    if (entry.is_regular_file() && entry.path().extension() == ".csv") {
-      result.push_back(entry.path().string());
-    }
-  }
-  std::sort(result.begin(), result.end());
-  return result;
-}
-
-}  // namespace
-
 CsvProducerComponent::CsvProducerComponent(
-    const components::ComponentConfig& config,
-    const components::ComponentContext& context)
-    : components::ComponentBase{config, context},
-      producer_{
-          context.FindComponent<kafka::ProducerComponent>().GetProducer()},
-      csv_dir_{config["csv-dir"].As<std::string>("/data")},
-      topic_{config["topic"].As<std::string>("input-topic")},
-      batch_size_{config["batch-size"].As<std::size_t>(100)} {
-  // Run CSV processing in a detached async task so it does not block
-  // the component tree startup.
-  utils::Async("csv-producer", [this] { ProcessAllFiles(); }).Detach();
+    const userver::components::ComponentConfig& config,
+    const userver::components::ComponentContext& context)
+    : userver::components::ComponentBase(config, context),
+      producer_(context
+                    .FindComponent<userver::kafka::ProducerComponent>(
+                        "kafka-producer")
+                    .GetProducer()),
+      csv_dir_(config["csv-dir"].As<std::string>()),
+      topic_(config["topic"].As<std::string>()),
+      batch_size_(config["batch-size"].As<std::size_t>(100)) {
+  task_ = userver::utils::Async("csv_processing_task",
+                                [this] { ProcessAllFiles(); });
+}
+
+std::string LoadAndSanitizeCsv(const std::string& file_path) {
+  std::ifstream file(file_path);
+  std::ostringstream buf;
+  bool inside_quotes = false;
+  char c;
+  while (file.get(c)) {
+    if (c == '"') inside_quotes = !inside_quotes;
+    if (inside_quotes && (c == '\n' || c == '\r')) {
+      buf << ' ';
+    } else {
+      buf << c;
+    }
+  }
+  return buf.str();
 }
 
 void CsvProducerComponent::ProcessAllFiles() {
-  const auto files = GlobCsvFiles(csv_dir_);
-  if (files.empty()) {
-    LOG_WARNING() << "No CSV files found in " << csv_dir_;
+  if (!std::filesystem::exists(csv_dir_)) {
+    LOG_ERROR() << "Directory not found: " << csv_dir_;
     return;
   }
 
-  LOG_INFO() << "Found " << files.size() << " CSV file(s) in " << csv_dir_;
-
-  for (const auto& path : files) {
-    LOG_INFO() << "Processing file: " << path;
-    try {
-      ProcessFile(path);
-    } catch (const std::exception& ex) {
-      LOG_ERROR() << "Failed to process file " << path << ": " << ex.what();
+  for (const auto& entry : std::filesystem::directory_iterator(csv_dir_)) {
+    if (entry.path().extension() == ".csv") {
+      ProcessFile(entry.path().string());
     }
   }
-
-  LOG_INFO() << "All CSV files processed.";
 }
 
 void CsvProducerComponent::ProcessFile(const std::string& file_path) {
-  std::ifstream file(file_path);
-  if (!file.is_open()) {
-    throw std::runtime_error("Cannot open file: " + file_path);
-  }
+  LOG_INFO() << "Processing file: " << file_path;
 
-  // Read header row
-  std::string header_line;
-  if (!std::getline(file, header_line)) {
-    LOG_WARNING() << "File is empty: " << file_path;
-    return;
-  }
-  const auto headers = ParseCsvLine(header_line);
+  try {
+    auto csv_content = LoadAndSanitizeCsv(file_path);
+    std::istringstream ss(csv_content);
+    rapidcsv::Document doc(ss, rapidcsv::LabelParams(0, -1));
 
-  std::vector<std::string> batch;
-  batch.reserve(batch_size_);
-  std::size_t total_sent = 0;
+    const auto column_names = doc.GetColumnNames();
+    const std::size_t row_count = doc.GetRowCount();
 
-  auto flush = [&] {
-    if (batch.empty()) return;
+    for (std::size_t i = 0; i < row_count; ++i) {
+      // Проверка на остановку сервиса
+      if (userver::engine::current_task::ShouldCancel()) {
+        LOG_WARNING() << "Task cancelled, stopping file: " << file_path;
+        return;
+      }
 
-    for (const auto& payload : batch) {
-      // Key is intentionally empty — use payload hash or row index
-      // if ordering guarantees are needed.
-      try {
-        producer_.Send(topic_, /*key=*/"", payload);
-      } catch (const kafka::SendException& ex) {
-        if (ex.IsRetryable()) {
-          LOG_WARNING() << "Retryable send error, skipping message: "
-                        << ex.what();
-        } else {
-          LOG_ERROR() << "Non-retryable send error: " << ex.what();
-        }
+      userver::formats::json::ValueBuilder builder{
+          userver::formats::json::Type::kObject};
+
+      for (const auto& col : column_names) {
+        builder[col] = doc.GetCell<std::string>(col, i);
+      }
+
+      const std::string key = fmt::format("{}-{}", file_path, i);
+      const auto msg = userver::formats::json::ToString(builder.ExtractValue());
+      producer_.Send(topic_, key, std::move(msg));
+
+      LOG_INFO() << msg << " sent to topic " << topic_;
+
+      if (i > 0 && i % batch_size_ == 0) {
+        userver::engine::Yield();
       }
     }
-    total_sent += batch.size();
-    LOG_DEBUG() << "Flushed batch of " << batch.size()
-                << " messages (total sent: " << total_sent << ")";
-    batch.clear();
-  };
 
-  std::string line;
-  while (std::getline(file, line)) {
-    if (line.empty()) continue;
+    LOG_INFO() << "Successfully finished " << file_path << " (" << row_count
+               << " rows)";
 
-    const auto values = ParseCsvLine(line);
-    try {
-      batch.push_back(MakeJsonPayload(headers, values));
-    } catch (const std::exception& ex) {
-      LOG_ERROR() << "Failed to build JSON payload: " << ex.what();
-      continue;
-    }
-
-    if (batch.size() >= batch_size_) {
-      flush();
-    }
+  } catch (const std::exception& ex) {
+    LOG_ERROR() << "Error parsing CSV file " << file_path << ": " << ex.what();
   }
-
-  // Flush remaining messages
-  flush();
-
-  LOG_INFO() << "File " << file_path
-             << " done. Total messages sent: " << total_sent;
 }
 
-yaml_config::Schema CsvProducerComponent::GetStaticConfigSchema() {
-  return yaml_config::MergeSchemas<components::ComponentBase>(R"(
+userver::yaml_config::Schema CsvProducerComponent::GetStaticConfigSchema() {
+  return userver::yaml_config::MergeSchemas<userver::components::ComponentBase>(
+      R"(
 type: object
-description: Reads CSV files and produces rows as JSON messages to Kafka.
+description: CSV to Kafka producer component
 additionalProperties: false
 properties:
     csv-dir:
         type: string
-        description: Path to the directory containing *.csv files.
+        description: directory with csv files
     topic:
         type: string
-        description: Kafka topic to produce messages to.
+        description: kafka topic to send data
     batch-size:
         type: integer
-        description: Number of messages accumulated before flushing to Kafka.
-    batch-timeout-ms:
-        type: integer
-        description: Unused; kept for config compatibility with Go producer.
+        description: how often to yield CPU
+        default: 100
 )");
 }
 

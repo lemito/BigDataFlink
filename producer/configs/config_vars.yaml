@@ -4,4 +4,4 @@ logger-level: info
 
 is-testing: false
 
-server-port: 8080
+server-port: 8052

@@ -20,12 +20,21 @@ include_directories(src)
 
 add_library(
     ${PROJECT_NAME}_objs OBJECT
-    src/greeting.cpp #
-    src/hello.cpp #
+    src/csv_producer.cpp
 )
 target_link_libraries(
     ${PROJECT_NAME}_objs
     PUBLIC userver::core userver::kafka
+)
+
+add_executable(${PROJECT_NAME} src/main.cpp)
+
+target_link_libraries(
+    ${PROJECT_NAME}
+    PRIVATE
+    ${PROJECT_NAME}_objs
+    userver::core
+    userver::kafka
 )
 
 # Install

@@ -33,7 +33,7 @@
   "forwardPorts": [
     8080
   ],
-  "image": "ghcr.io/userver-framework/ubuntu-22.04-userver-pg-dev:latest",
+  "image": "ghcr.io/userver-framework/ubuntu-22.04-userver-dev:latest",
   "mounts": [],
   "onCreateCommand": "sudo git config --global --add safe.directory /home/user/producer",
   "remoteUser": "user",
