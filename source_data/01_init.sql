@@ -44,7 +44,7 @@ CREATE TABLE dim_customers (
     age         INTEGER,
     country     VARCHAR(100),
     postal_code VARCHAR(20),
-    pet_id      INTEGER REFERENCES dim_pets(pet_id)
+    pet_id      INTEGER
 );
 
 CREATE TABLE dim_products (
@@ -63,15 +63,15 @@ CREATE TABLE dim_products (
     reviews     TEXT,
     release_date DATE,
     expiry_date  DATE,
-    supplier_id INTEGER REFERENCES dim_suppliers(supplier_id)
+    supplier_id INTEGER
 );
 
 CREATE TABLE fact_sales (
     sale_id     SERIAL PRIMARY KEY,
-    customer_id INTEGER REFERENCES dim_customers(customer_id),
-    seller_id   INTEGER REFERENCES dim_sellers(seller_id),
-    product_id  INTEGER REFERENCES dim_products(product_id),
-    store_id    INTEGER REFERENCES dim_stores(store_id),
+    customer_id INTEGER,
+    seller_id   INTEGER,
+    product_id  INTEGER,
+    store_id    INTEGER,
     quantity    INTEGER,
     total_price DECIMAL(10, 2),
     date        DATE
