@@ -1,15 +1,14 @@
-SET
-    'execution.runtime-mode' = 'streaming';
+-- Flink SQL Job Configuration
+SET 'execution.runtime-mode' = 'streaming';
+SET 'execution.attached' = 'false';
+SET 'parallelism.default' = '1';
+SET 'execution.checkpointing.interval' = '10s';
+SET 'execution.checkpointing.timeout' = '5min';
+SET 'execution.checkpointing.min-pause' = '5s';
+SET 'sql-client.execution.result-mode' = 'TABLEAU';
+SET 'table.exec.state.ttl' = '1h';
 
-SET
-    'execution.attached' = 'false';
-
-SET
-    'parallelism.default' = '1';
-
-SET
-    'execution.checkpointing.interval' = '10s';
-
+-- Kafka source table definition
 CREATE TABLE
     kafka_source (
         id INT,
@@ -44,6 +43,7 @@ CREATE TABLE
         sale_date STRING,
         sale_customer_id INT,
         sale_seller_id INT,
+        sale_store_id INT,
         sale_product_id INT,
         sale_quantity INT,
         sale_total_price FLOAT,
@@ -65,13 +65,16 @@ CREATE TABLE
 WITH
     (
         'connector' = 'kafka',
-        'topic' = 'csv_data',
+        'topic' = 'input-topic',
         'properties.bootstrap.servers' = 'broker:9092',
         'properties.group.id' = 'flink-group',
         'scan.startup.mode' = 'earliest-offset',
-        'format' = 'json'
+        'format' = 'json',
+        'json.timestamp-format.standard' = 'ISO-8601',
+        'json.fail-on-missing-field' = 'false'
     );
 
+-- Supplier dimension sink table
 CREATE TABLE
     sink_dim_suppliers (
         name STRING,
@@ -80,7 +83,8 @@ CREATE TABLE
         phone STRING,
         address STRING,
         city STRING,
-        country STRING
+        country STRING,
+        PRIMARY KEY (name) NOT ENFORCED
     )
 WITH
     (
@@ -88,14 +92,17 @@ WITH
         'url' = 'jdbc:postgresql://db:5432/db',
         'table-name' = 'dim_suppliers',
         'username' = 'meow',
-        'password' = 'UwU'
+        'password' = 'UwU',
+        'connection.max-retry-timeout' = '60s'
     );
 
+-- Pets dimension sink table
 CREATE TABLE
     sink_dim_pets (
         name STRING,
         breed_name STRING,
-        pet_type_name STRING
+        pet_type_name STRING,
+        PRIMARY KEY (name, breed_name, pet_type_name) NOT ENFORCED
     )
 WITH
     (
@@ -103,9 +110,11 @@ WITH
         'url' = 'jdbc:postgresql://db:5432/db',
         'table-name' = 'dim_pets',
         'username' = 'meow',
-        'password' = 'UwU'
+        'password' = 'UwU',
+        'connection.max-retry-timeout' = '60s'
     );
 
+-- Stores dimension sink table
 CREATE TABLE
     sink_dim_stores (
         name STRING,
@@ -114,7 +123,8 @@ CREATE TABLE
         state STRING,
         country STRING,
         phone STRING,
-        email STRING
+        email STRING,
+        PRIMARY KEY (name) NOT ENFORCED
     )
 WITH
     (
@@ -122,9 +132,11 @@ WITH
         'url' = 'jdbc:postgresql://db:5432/db',
         'table-name' = 'dim_stores',
         'username' = 'meow',
-        'password' = 'UwU'
+        'password' = 'UwU',
+        'connection.max-retry-timeout' = '60s'
     );
 
+-- Sellers dimension sink table
 CREATE TABLE
     sink_dim_sellers (
         seller_id INT,
@@ -141,9 +153,11 @@ WITH
         'url' = 'jdbc:postgresql://db:5432/db',
         'table-name' = 'dim_sellers',
         'username' = 'meow',
-        'password' = 'UwU'
+        'password' = 'UwU',
+        'connection.max-retry-timeout' = '60s'
     );
 
+-- Customers dimension sink table
 CREATE TABLE
     sink_dim_customers (
         customer_id INT,
@@ -162,24 +176,26 @@ WITH
         'url' = 'jdbc:postgresql://db:5432/db',
         'table-name' = 'dim_customers',
         'username' = 'meow',
-        'password' = 'UwU'
+        'password' = 'UwU',
+        'connection.max-retry-timeout' = '60s'
     );
 
+-- Products dimension sink table
 CREATE TABLE
     sink_dim_products (
         product_id INT,
         name STRING,
         pet_category STRING,
         category STRING,
-        price DECIMAL(10, 2),
-        weight DECIMAL(10, 2),
+        price FLOAT,
+        weight FLOAT,
         color STRING,
         size STRING,
         brand STRING,
         material STRING,
         description STRING,
-        rating DECIMAL(3, 1),
-        reviews STRING,
+        rating FLOAT,
+        reviews INT,
         release_date DATE,
         expiry_date DATE,
         supplier_id INT,
@@ -191,18 +207,23 @@ WITH
         'url' = 'jdbc:postgresql://db:5432/db',
         'table-name' = 'dim_products',
         'username' = 'meow',
-        'password' = 'UwU'
+        'password' = 'UwU',
+        'connection.max-retry-timeout' = '60s'
     );
 
+-- Fact sales sink table
 CREATE TABLE
     sink_fact_sales (
+        sale_id INT,
         customer_id INT,
         seller_id INT,
         product_id INT,
-        store_id INT,
+        store_name STRING,
+        supplier_name STRING,
         quantity INT,
-        total_price DECIMAL(10, 2),
-        `date` DATE
+        total_price FLOAT,
+        sale_date DATE,
+        PRIMARY KEY (sale_id) NOT ENFORCED
     )
 WITH
     (
@@ -210,12 +231,14 @@ WITH
         'url' = 'jdbc:postgresql://db:5432/db',
         'table-name' = 'fact_sales',
         'username' = 'meow',
-        'password' = 'UwU'
+        'password' = 'UwU',
+        'connection.max-retry-timeout' = '60s'
     );
 
-BEGIN STATEMENT
-SET;
+-- Execute all INSERT statements as a single transaction
+BEGIN STATEMENT SET;
 
+-- Load supplier dimension table
 INSERT INTO
     sink_dim_suppliers
 SELECT DISTINCT
@@ -229,8 +252,9 @@ SELECT DISTINCT
 FROM
     kafka_source
 WHERE
-    supplier_email IS NOT NULL;
+    supplier_name IS NOT NULL AND supplier_name <> '';
 
+-- Load pets dimension table
 INSERT INTO
     sink_dim_pets
 SELECT DISTINCT
@@ -240,23 +264,25 @@ SELECT DISTINCT
 FROM
     kafka_source
 WHERE
-    customer_pet_name IS NOT NULL;
+    customer_pet_name IS NOT NULL AND customer_pet_name <> '';
 
+-- Extract unique store information from source data
 INSERT INTO
     sink_dim_stores
 SELECT DISTINCT
     store_name AS name,
-    store_location AS location,
-    store_city AS city,
-    store_state AS state,
-    store_country AS country,
-    store_phone AS phone,
-    store_email AS email
+    store_location,
+    store_city,
+    store_state,
+    store_country,
+    store_phone,
+    store_email
 FROM
     kafka_source
 WHERE
-    store_email IS NOT NULL;
+    store_name IS NOT NULL AND store_name <> '';
 
+-- Extract unique seller information from source data
 INSERT INTO
     sink_dim_sellers
 SELECT DISTINCT
@@ -271,6 +297,7 @@ FROM
 WHERE
     sale_seller_id IS NOT NULL;
 
+-- Extract unique customer information from source data
 INSERT INTO
     sink_dim_customers
 SELECT DISTINCT
@@ -281,14 +308,13 @@ SELECT DISTINCT
     customer_age AS age,
     customer_country AS country,
     customer_postal_code AS postal_code,
-    CAST(
-        CRC32 (customer_email || customer_pet_name) AS INT
-    ) AS pet_id
+    CAST(NULL AS INT) AS pet_id
 FROM
     kafka_source
 WHERE
     sale_customer_id IS NOT NULL;
 
+-- Extract unique product information from source data
 INSERT INTO
     sink_dim_products
 SELECT DISTINCT
@@ -296,36 +322,40 @@ SELECT DISTINCT
     product_name AS name,
     pet_category,
     product_category AS category,
-    CAST(product_price AS DECIMAL(10, 2)) AS price,
-    CAST(product_weight AS DECIMAL(10, 2)) AS weight,
+    product_price AS price,
+    product_weight AS weight,
     product_color AS color,
     product_size AS size,
     product_brand AS brand,
     product_material AS material,
     product_description AS description,
-    CAST(product_rating AS DECIMAL(3, 1)) AS rating,
-    CAST(product_reviews AS STRING) AS reviews,
-    TO_DATE (product_release_date, 'M/d/yyyy') AS release_date,
-    TO_DATE (product_expiry_date, 'M/d/yyyy') AS expiry_date,
-    CAST(CRC32 (supplier_email) AS INT) AS supplier_id
+    product_rating AS rating,
+    product_reviews AS reviews,
+    TO_DATE(product_release_date, 'MM/dd/yyyy') AS release_date,
+    TO_DATE(product_expiry_date, 'MM/dd/yyyy') AS expiry_date,
+    CAST(NULL AS INT) AS supplier_id
 FROM
     kafka_source
 WHERE
     sale_product_id IS NOT NULL;
 
+-- Load fact table with sales transactions
 INSERT INTO
     sink_fact_sales
 SELECT
-    sale_customer_id AS customer_id,
-    sale_seller_id AS seller_id,
-    sale_product_id AS product_id,
-    CAST(CRC32 (store_email) AS INT) AS store_id,
-    sale_quantity AS quantity,
-    CAST(sale_total_price AS DECIMAL(10, 2)) AS total_price,
-    CAST(TO_TIMESTAMP (sale_date, 'M/d/yyyy') AS DATE) AS `date`
+    id,
+    sale_customer_id,
+    sale_seller_id,
+    sale_product_id,
+    store_name,
+    supplier_name,
+    sale_quantity,
+    sale_total_price,
+    TO_DATE(sale_date, 'MM/dd/yyyy')
 FROM
     kafka_source
 WHERE
-    sale_customer_id IS NOT NULL;
+    id IS NOT NULL;
 
+-- End of statement set
 END;

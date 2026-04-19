@@ -4,4 +4,8 @@ logger-level: info
 
 is-testing: false
 
+monitor-server-port: 8053
 server-port: 8052
+
+csv-dir: /data
+kafka-topic: input-topic

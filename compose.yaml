@@ -45,11 +45,12 @@ services:
 
   kafka-ui:
     container_name: kafka-ui
-    image: provectuslabs/kafka-ui:latest
+    image: ghcr.io/kafbat/kafka-ui:latest
     ports:
       - 8085:8080
     environment:
       DYNAMIC_CONFIG_ENABLED: 'true'
+      SWAGGER_UI_ENABLED: 'true'
     volumes:
       - ./kui/config.yml:/etc/kafkaui/dynamic_config.yaml
     depends_on:
@@ -83,11 +84,11 @@ services:
       - |
         FLINK_PROPERTIES=
         jobmanager.rpc.address: jobmanager
-    healthcheck:
-      test: ["CMD", "wget", "-nv", "-t1", "--spider", "http://localhost:8081/overview"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
+    # healthcheck:
+    #   test: ["CMD", "wget", "-nv", "-t1", "--spider", "http://localhost:8081/overview"]
+    #   interval: 5s
+    #   timeout: 5s
+    #   retries: 10
     depends_on:
       flink-loader:
         condition: service_completed_successfully
@@ -106,8 +107,10 @@ services:
             taskmanager.numberOfTaskSlots: 10
             taskmanager.memory.process.size: 1600m
     depends_on:
+      flink-loader:
+        condition: service_completed_successfully
       jobmanager:
-        condition: service_healthy
+        condition: service_started
     networks:
       - meowork
 
@@ -116,14 +119,17 @@ services:
     container_name: flink_job
     command: >
       sh -c "sleep 5 &&
-             /opt/flink/bin/sql-client.sh --file /flink/job.sql"
+             /opt/flink/bin/sql-client.sh --file /flink/job.sql &&
+             touch /tmp/job_ready &&
+             tail -f /dev/null"
     volumes:
       - flink_libs:/opt/flink/lib
       - ./flink:/flink:ro
     environment:
-      - |
-        FLINK_PROPERTIES=
-        jobmanager.rpc.address: jobmanager
+      FLINK_PROPERTIES: |
+              jobmanager.rpc.address: jobmanager
+              rest.address: jobmanager
+              rest.port: 8081
     depends_on:
       flink-loader:
         condition: service_completed_successfully
@@ -145,13 +151,12 @@ services:
       start_period: 45s
 
   producer:
-        image: ghcr.io/userver-framework/ubuntu-24.04-userver:latest
+        image: ghcr.io/userver-framework/ubuntu-22.04-userver:latest
         privileged: true
         environment:
             - CCACHE_DIR=/producer/.ccache
             - CMAKE_OPTIONS
             - CORES_DIR=/cores
-            # - SECDIST_CONFIG={"kafka_settings":{"kafka-producer":{"brokers":"broker:9092"}}}
         volumes:
           - ./producer:/producer:rw
           - ${TC_CORES_DIR:-./.cores}:/cores:rw
@@ -159,8 +164,10 @@ services:
           - ./producer/configs/secure_data.json:/etc/producer/secure_data.json:ro
           - ./producer/configs/static_config.yaml:/etc/producer/static_config.yaml:ro
           - ./producer/configs/config_vars.yaml:/etc/producer/config_vars.yaml:ro
+          - producer_logs:/producer/build/logs
         ports:
           - 8052:8052
+          - 8053:8053
         working_dir: /producer
         command: >
                     bash -c "
@@ -178,6 +185,38 @@ services:
         networks:
         - meowork
 
+  promtail:
+    image: grafana/promtail:latest
+    volumes:
+      - ./promtail.yml:/etc/promtail/config.yml
+      - producer_logs:/logs
+    command: -config.file=/etc/promtail/config.yml
+    depends_on:
+      - loki
+    networks:
+      - meowork
+
+  loki:
+    image: grafana/loki:latest
+    ports: ["3100:3100"]
+    command: -config.file=/etc/loki/local-config.yaml
+    networks:
+      - meowork
+
+  grafana:
+    image: grafana/grafana:latest
+    ports: ["3000:3000"]
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning
+    depends_on:
+      - loki
+    networks:
+      - meowork
+
 networks:
   meowork:
     driver: bridge
@@ -185,3 +224,4 @@ networks:
 volumes:
   postgres_data:
   flink_libs:
+  producer_logs:

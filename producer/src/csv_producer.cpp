@@ -3,15 +3,24 @@
 #include <filesystem>
 #include <fstream>
 #include <sstream>
+#include <unordered_set>
+
 #include <userver/components/component_config.hpp>
 #include <userver/components/component_context.hpp>
 #include <userver/engine/async.hpp>
+#include <userver/engine/semaphore.hpp>
 #include <userver/engine/sleep.hpp>
+#include <userver/engine/task/task_with_result.hpp>
 #include <userver/formats/json/serialize.hpp>
 #include <userver/formats/json/value_builder.hpp>
+#include <userver/fs/blocking/read.hpp>
+#include <userver/kafka/headers.hpp>
 #include <userver/kafka/producer_component.hpp>
 #include <userver/logging/log.hpp>
 #include <userver/yaml_config/merge_schemas.hpp>
+
+const std::unordered_set<std::string> kOffsetFields = {
+    "id", "sale_customer_id", "sale_seller_id", "sale_product_id"};
 
 namespace kafka_sample {
 
@@ -23,6 +32,7 @@ CsvProducerComponent::CsvProducerComponent(
                     .FindComponent<userver::kafka::ProducerComponent>(
                         "kafka-producer")
                     .GetProducer()),
+      fs_task_processor_(context.GetTaskProcessor("fs-task-processor")),
       csv_dir_(config["csv-dir"].As<std::string>()),
       topic_(config["topic"].As<std::string>()),
       batch_size_(config["batch-size"].As<std::size_t>(100)) {
@@ -30,77 +40,155 @@ CsvProducerComponent::CsvProducerComponent(
                                 [this] { ProcessAllFiles(); });
 }
 
-std::string LoadAndSanitizeCsv(const std::string& file_path) {
-  std::ifstream file(file_path);
-  std::ostringstream buf;
-  bool inside_quotes = false;
-  char c;
-  while (file.get(c)) {
-    if (c == '"') inside_quotes = !inside_quotes;
-    if (inside_quotes && (c == '\n' || c == '\r')) {
-      buf << ' ';
-    } else {
-      buf << c;
-    }
-  }
-  return buf.str();
-}
-
 void CsvProducerComponent::ProcessAllFiles() {
-  if (!std::filesystem::exists(csv_dir_)) {
-    LOG_ERROR() << "Directory not found: " << csv_dir_;
-    return;
-  }
+  try {
+    auto files =
+        userver::engine::AsyncNoSpan(fs_task_processor_, [this] {
+          std::vector<std::string> result;
+          if (!std::filesystem::exists(csv_dir_)) {
+            return result;
+          }
+          for (const auto& entry :
+               std::filesystem::directory_iterator(csv_dir_)) {
+            if (entry.is_regular_file() && entry.path().extension() == ".csv") {
+              result.push_back(entry.path().string());
+            }
+          }
+          return result;
+        }).Get();
 
-  for (const auto& entry : std::filesystem::directory_iterator(csv_dir_)) {
-    if (entry.path().extension() == ".csv") {
-      ProcessFile(entry.path().string());
+    if (files.empty()) {
+      LOG_INFO() << "No CSV files found in directory: " << csv_dir_;
+      return;
     }
+
+    auto semaphore = std::make_shared<userver::engine::Semaphore>(5);
+
+    const std::size_t total_files = files.size();
+    std::vector<userver::engine::TaskWithResult<isComplete>> tasks;
+    tasks.reserve(total_files);
+
+    for (std::size_t i = 0; i < total_files; ++i) {
+      tasks.push_back(userver::utils::Async(
+          "process_file", [this, file_path = files[i], i, semaphore] {
+            userver::engine::SemaphoreLock lock(*semaphore);
+            return ProcessFile(file_path, i);
+          }));
+    }
+
+    for (auto& t : tasks) {
+      auto res = t.Get();
+      if (res == isComplete::kCancelled) {
+        LOG_WARNING() << "Processing was cancelled";
+        return;
+      } else if (res == isComplete::kError) {
+        LOG_ERROR() << "Processing failed for one of the files";
+      }
+    }
+
+    LOG_INFO() << "Finished processing all CSV files in directory: "
+               << csv_dir_;
+  } catch (const std::exception& e) {
+    LOG_ERROR("Error processing CSV files: {}", e.what());
   }
 }
 
-void CsvProducerComponent::ProcessFile(const std::string& file_path) {
-  LOG_INFO() << "Processing file: " << file_path;
-
+CsvProducerComponent::isComplete CsvProducerComponent::ProcessFile(
+    const std::string& file_path, std::size_t file_idx) {
   try {
-    auto csv_content = LoadAndSanitizeCsv(file_path);
-    std::istringstream ss(csv_content);
-    rapidcsv::Document doc(ss, rapidcsv::LabelParams(0, -1));
+    LOG_INFO("Processing file: {}, index: {}", file_path, file_idx);
+
+    auto doc =
+        userver::engine::AsyncNoSpan(fs_task_processor_, [&file_path] {
+          std::ifstream stream(file_path, std::ios::binary);
+          if (!stream.is_open()) {
+            throw std::runtime_error("Failed to open file: " + file_path);
+          }
+          return rapidcsv::Document(
+              stream, rapidcsv::LabelParams(0, -1),
+              rapidcsv::SeparatorParams(',', false, false, true));
+        }).Get();
 
     const auto column_names = doc.GetColumnNames();
-    const std::size_t row_count = doc.GetRowCount();
+    const auto row_count = doc.GetRowCount();
+    const auto expected_cols = column_names.size();
+    const std::string filename =
+        std::filesystem::path(file_path).filename().string();
+    const std::int64_t offset = static_cast<std::int64_t>(file_idx) * 1000;
 
     for (std::size_t i = 0; i < row_count; ++i) {
-      // Проверка на остановку сервиса
-      if (userver::engine::current_task::ShouldCancel()) {
-        LOG_WARNING() << "Task cancelled, stopping file: " << file_path;
-        return;
+      if (userver::engine::current_task::ShouldCancel())
+        return isComplete::kCancelled;
+
+      std::vector<std::string> row;
+      try {
+        row = doc.GetRow<std::string>(i);
+      } catch (const std::exception& e) {
+        throw std::runtime_error(fmt::format(
+            "Failed to read row {} in file {}: {}", i, file_path, e.what()));
       }
 
       userver::formats::json::ValueBuilder builder{
           userver::formats::json::Type::kObject};
+      bool has_real_content = false;
+      std::string original_id = "unknown";
 
-      for (const auto& col : column_names) {
-        builder[col] = doc.GetCell<std::string>(col, i);
+      for (std::size_t col_idx = 0; col_idx < expected_cols; ++col_idx) {
+        const std::string& col_name = column_names[col_idx];
+        std::string value = (col_idx < row.size()) ? row[col_idx] : "";
+
+        if (kOffsetFields.count(col_name)) {
+          try {
+            if (col_name == "id") original_id = value;
+            std::int64_t val_as_int = std::stoll(value);
+            builder[col_name] = val_as_int + offset;
+            has_real_content = true;
+          } catch (...) {
+            builder[col_name] = value;
+          }
+        } else {
+          if (!value.empty() && value != "\"\"" && value != "null") {
+            has_real_content = true;
+          }
+          builder[col_name] = std::move(value);
+        }
       }
 
-      const std::string key = fmt::format("{}-{}", file_path, i);
-      const auto msg = userver::formats::json::ToString(builder.ExtractValue());
-      producer_.Send(topic_, key, std::move(msg));
-
-      LOG_INFO() << msg << " sent to topic " << topic_;
-
-      if (i > 0 && i % batch_size_ == 0) {
-        userver::engine::Yield();
+      if (!has_real_content) {
+        LOG_WARNING() << "Skipping empty row " << i << " in file " << file_path;
+        continue;
       }
+
+      auto msg = userver::formats::json::ToString(builder.ExtractValue());
+      if (msg.empty()) {
+        throw std::runtime_error("Failed to serialize JSON message for row " +
+                                 std::to_string(i) + " in file " + file_path);
+      }
+
+      std::vector<userver::kafka::HeaderView> header_views{
+          userver::kafka::HeaderView{"original_id", std::move(original_id)},
+          userver::kafka::HeaderView{"source_file", filename},
+          userver::kafka::HeaderView{"file_index", std::to_string(file_idx)}};
+      producer_.Send(topic_, fmt::format("{}-{}", filename, i), msg,
+                     userver::kafka::kUnassignedPartition, header_views);
+
+      if (i % batch_size_ == 0) userver::engine::Yield();
     }
 
-    LOG_INFO() << "Successfully finished " << file_path << " (" << row_count
-               << " rows)";
-
+    std::error_code ec;
+    std::filesystem::remove(file_path, ec);
+    if (ec) {
+      LOG_ERROR() << "Successfully processed but FAILED to remove file: "
+                  << file_path << ". Error: " << ec.message();
+    } else {
+      LOG_INFO() << "Successfully finished and removed: " << file_path;
+    }
   } catch (const std::exception& ex) {
-    LOG_ERROR() << "Error parsing CSV file " << file_path << ": " << ex.what();
+    LOG_ERROR() << "Critical error in ProcessFile [" << file_path
+                << "]: " << ex.what();
+    return isComplete::kError;
   }
+  return isComplete::kSuccess;
 }
 
 userver::yaml_config::Schema CsvProducerComponent::GetStaticConfigSchema() {
