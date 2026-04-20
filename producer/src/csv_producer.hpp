@@ -15,10 +15,11 @@
 namespace kafka_sample {
 
 class CsvProducerComponent final : public userver::components::ComponentBase {
-  enum class isComplete : int8_t { kSuccess, kCancelled, kError = -1 };
-
  public:
+  enum class isComplete : int8_t { kSuccess, kCancelled, kError = -1 };
   static constexpr std::string_view kName = "csv-producer";
+  void OnAllComponentsLoaded() override;
+
   CsvProducerComponent(const userver::components::ComponentConfig& config,
                        const userver::components::ComponentContext& context);
 
@@ -26,8 +27,7 @@ class CsvProducerComponent final : public userver::components::ComponentBase {
 
  private:
   void ProcessAllFiles();
-  isComplete ProcessFile(const std::string& file_path,
-                         std::size_t file_idx);
+  isComplete ProcessFile(const std::string& file_path, std::size_t file_idx);
 
   const userver::kafka::Producer& producer_;
   userver::engine::TaskProcessor& fs_task_processor_;

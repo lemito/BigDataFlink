@@ -1,7 +1,7 @@
 PROJECT_NAME = producer
 NPROCS ?= $(shell nproc)
 CLANG_FORMAT ?= clang-format
-DOCKER_IMAGE ?= ghcr.io/userver-framework/ubuntu-24.04-userver:latest
+DOCKER_IMAGE ?= ghcr.io/userver-framework/ubuntu-22.04-userver:latest
 CMAKE_OPTS ?=
 # If we're under TTY, pass "-it" to "docker run"
 DOCKER_ARGS = $(shell /bin/test -t 0 && /bin/echo -it || echo)

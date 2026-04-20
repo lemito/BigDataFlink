@@ -1,11 +1,33 @@
+server-name: sample-production-service 1.0
+service-name: sample-production-service
+
+main_worker_threads: 4
+fs_worker_threads: 2
+monitor_worker_threads: 1
+
+event_threads: 2
+
+coro-pool-initial-size: 4000
+coro-pool-max-size: 50000
+
 worker-threads: 4
 worker-fs-threads: 2
 logger-level: info
 
 is-testing: false
+testsuite-enabled: false
 
 monitor-server-port: 8053
 server-port: 8052
+
+config-server-url: http://localhost:8083
+
+userver-dumps-root: /var/cache/producer/userver-dumps/
+access-log-path: /var/log/producer/access.log
+access-tskv-log-path: /var/log/producer/access_tskv.log
+default-log-path: /var/log/producer/server.log
+
+config-cache: /var/cache/producer/config_cache.json
 
 csv-dir: /data
 kafka-topic: input-topic

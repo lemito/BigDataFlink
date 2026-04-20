@@ -24,6 +24,11 @@ const std::unordered_set<std::string> kOffsetFields = {
 
 namespace kafka_sample {
 
+void CsvProducerComponent::OnAllComponentsLoaded() {
+  task_ = userver::utils::Async("csv_processing_task",
+                                [this] { ProcessAllFiles(); });
+}
+
 CsvProducerComponent::CsvProducerComponent(
     const userver::components::ComponentConfig& config,
     const userver::components::ComponentContext& context)
@@ -36,8 +41,6 @@ CsvProducerComponent::CsvProducerComponent(
       csv_dir_(config["csv-dir"].As<std::string>()),
       topic_(config["topic"].As<std::string>()),
       batch_size_(config["batch-size"].As<std::size_t>(100)) {
-  task_ = userver::utils::Async("csv_processing_task",
-                                [this] { ProcessAllFiles(); });
 }
 
 void CsvProducerComponent::ProcessAllFiles() {
@@ -99,7 +102,7 @@ CsvProducerComponent::isComplete CsvProducerComponent::ProcessFile(
     LOG_INFO("Processing file: {}, index: {}", file_path, file_idx);
 
     auto doc =
-        userver::engine::AsyncNoSpan(fs_task_processor_, [&file_path] {
+        userver::engine::AsyncNoSpan(fs_task_processor_, [file_path] {
           std::ifstream stream(file_path, std::ios::binary);
           if (!stream.is_open()) {
             throw std::runtime_error("Failed to open file: " + file_path);
@@ -159,19 +162,15 @@ CsvProducerComponent::isComplete CsvProducerComponent::ProcessFile(
         continue;
       }
 
-      auto msg = userver::formats::json::ToString(builder.ExtractValue());
+      const std::string msg =
+          userver::formats::json::ToString(builder.ExtractValue());
       if (msg.empty()) {
         throw std::runtime_error("Failed to serialize JSON message for row " +
                                  std::to_string(i) + " in file " + file_path);
       }
 
-      std::vector<userver::kafka::HeaderView> header_views{
-          userver::kafka::HeaderView{"original_id", std::move(original_id)},
-          userver::kafka::HeaderView{"source_file", filename},
-          userver::kafka::HeaderView{"file_index", std::to_string(file_idx)}};
-      producer_.Send(topic_, fmt::format("{}-{}", filename, i), msg,
-                     userver::kafka::kUnassignedPartition, header_views);
-
+      const std::string key = fmt::format("{}-{}", filename, i);
+      producer_.Send(topic_, key, msg);
       if (i % batch_size_ == 0) userver::engine::Yield();
     }
 

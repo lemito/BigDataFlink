@@ -162,19 +162,25 @@ services:
           - ${TC_CORES_DIR:-./.cores}:/cores:rw
           - ./source_data:/data:ro
           - ./producer/configs/secure_data.json:/etc/producer/secure_data.json:ro
-          - ./producer/configs/static_config.yaml:/etc/producer/static_config.yaml:ro
           - ./producer/configs/config_vars.yaml:/etc/producer/config_vars.yaml:ro
+          - ./producer/configs/static_config.yaml:/etc/producer/static_config.yaml:ro
           - producer_logs:/producer/build/logs
         ports:
           - 8052:8052
           - 8053:8053
         working_dir: /producer
+        # entrypoint: ./run_as_user.sh $$(id -u) $$(id -g)
+        # command: >
+        #   sh -c "
+        #     make build-debug -j$$(nproc) &&
+        #     /producer/build-debug/producer --config /etc/producer/static_config.yaml
+        #     "
         command: >
                     bash -c "
                         cd /producer &&
                         mkdir -p build && cd build &&
                         cmake .. -DCMAKE_BUILD_TYPE=Release ${CMAKE_OPTIONS} &&
-                        make -j$$(nproc) &&
+                        make -j 8 &&
                         /producer/build/producer --config /etc/producer/static_config.yaml
                     "
         depends_on:
