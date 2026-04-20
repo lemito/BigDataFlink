@@ -134,7 +134,7 @@ CsvProducerComponent::isComplete CsvProducerComponent::ProcessFile(
       userver::formats::json::ValueBuilder builder{
           userver::formats::json::Type::kObject};
       bool has_real_content = false;
-      std::string original_id = "unknown";
+      std::string original_id = "-1";
 
       for (std::size_t col_idx = 0; col_idx < expected_cols; ++col_idx) {
         const std::string& col_name = column_names[col_idx];

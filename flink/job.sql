@@ -1,4 +1,3 @@
--- Flink SQL Job Configuration
 SET 'execution.runtime-mode' = 'streaming';
 SET 'execution.attached' = 'false';
 SET 'parallelism.default' = '1';
@@ -8,7 +7,6 @@ SET 'execution.checkpointing.min-pause' = '5s';
 SET 'sql-client.execution.result-mode' = 'TABLEAU';
 SET 'table.exec.state.ttl' = '1h';
 
--- Kafka source table definition
 CREATE TABLE
     kafka_source (
         id INT,
@@ -39,6 +37,7 @@ CREATE TABLE
         product_reviews INT,
         product_release_date STRING,
         product_expiry_date STRING,
+        product_quantity INT,
         pet_category STRING,
         sale_date STRING,
         sale_customer_id INT,
@@ -74,7 +73,6 @@ WITH
         'json.fail-on-missing-field' = 'false'
     );
 
--- Supplier dimension sink table
 CREATE TABLE
     sink_dim_suppliers (
         name STRING,
@@ -96,7 +94,6 @@ WITH
         'connection.max-retry-timeout' = '60s'
     );
 
--- Pets dimension sink table
 CREATE TABLE
     sink_dim_pets (
         name STRING,
@@ -114,7 +111,6 @@ WITH
         'connection.max-retry-timeout' = '60s'
     );
 
--- Stores dimension sink table
 CREATE TABLE
     sink_dim_stores (
         name STRING,
@@ -136,7 +132,6 @@ WITH
         'connection.max-retry-timeout' = '60s'
     );
 
--- Sellers dimension sink table
 CREATE TABLE
     sink_dim_sellers (
         seller_id INT,
@@ -157,7 +152,6 @@ WITH
         'connection.max-retry-timeout' = '60s'
     );
 
--- Customers dimension sink table
 CREATE TABLE
     sink_dim_customers (
         customer_id INT,
@@ -180,7 +174,6 @@ WITH
         'connection.max-retry-timeout' = '60s'
     );
 
--- Products dimension sink table
 CREATE TABLE
     sink_dim_products (
         product_id INT,
@@ -211,7 +204,6 @@ WITH
         'connection.max-retry-timeout' = '60s'
     );
 
--- Fact sales sink table
 CREATE TABLE
     sink_fact_sales (
         sale_id INT,
@@ -235,10 +227,8 @@ WITH
         'connection.max-retry-timeout' = '60s'
     );
 
--- Execute all INSERT statements as a single transaction
 BEGIN STATEMENT SET;
 
--- Load supplier dimension table
 INSERT INTO
     sink_dim_suppliers
 SELECT DISTINCT
@@ -254,7 +244,6 @@ FROM
 WHERE
     supplier_name IS NOT NULL AND supplier_name <> '';
 
--- Load pets dimension table
 INSERT INTO
     sink_dim_pets
 SELECT DISTINCT
@@ -266,7 +255,6 @@ FROM
 WHERE
     customer_pet_name IS NOT NULL AND customer_pet_name <> '';
 
--- Extract unique store information from source data
 INSERT INTO
     sink_dim_stores
 SELECT DISTINCT
@@ -282,7 +270,6 @@ FROM
 WHERE
     store_name IS NOT NULL AND store_name <> '';
 
--- Extract unique seller information from source data
 INSERT INTO
     sink_dim_sellers
 SELECT DISTINCT
@@ -297,7 +284,6 @@ FROM
 WHERE
     sale_seller_id IS NOT NULL;
 
--- Extract unique customer information from source data
 INSERT INTO
     sink_dim_customers
 SELECT DISTINCT
@@ -314,7 +300,6 @@ FROM
 WHERE
     sale_customer_id IS NOT NULL;
 
--- Extract unique product information from source data
 INSERT INTO
     sink_dim_products
 SELECT DISTINCT
@@ -339,7 +324,6 @@ FROM
 WHERE
     sale_product_id IS NOT NULL;
 
--- Load fact table with sales transactions
 INSERT INTO
     sink_fact_sales
 SELECT
@@ -357,5 +341,4 @@ FROM
 WHERE
     id IS NOT NULL;
 
--- End of statement set
 END;
